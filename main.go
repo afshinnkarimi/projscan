@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,6 +11,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var releaseNamePattern = regexp.MustCompile(`^[A-Za-z]+(?:_[A-Za-z]+)*_[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$`)
@@ -17,6 +21,16 @@ var releaseNamePattern = regexp.MustCompile(`^[A-Za-z]+(?:_[A-Za-z]+)*_[0-9]+\.[
 type directoryResult struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
+}
+
+type scanResult struct {
+	Name      string            `json:"name"`
+	Path      string            `json:"path"`
+	Type      string            `json:"type"`
+	Inventory artifactInventory `json:"inventory,omitempty"`
+	Errors    []string          `json:"errors,omitempty"`
+	latestKey string
+	latestTag string
 }
 
 func isReleaseName(name string) bool {
@@ -173,23 +187,100 @@ func compareVersions(a, b []int) int {
 }
 
 func main() {
-	directory, _ := os.Getwd()
-	searchDir := directory
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
 
-	results := latestVersionResults(listDirectoryResults(searchDir))
-	for _, item := range listDirectoryNames(results) {
-		fmt.Println(item)
+func run(args []string, stdout, stderr io.Writer) int {
+	command := newRootCommand(stdout, stderr)
+	command.SetArgs(args)
+	if err := command.Execute(); err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
 	}
+	return 0
+}
+
+func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
+	config := viper.New()
+	config.SetEnvPrefix("PROJSCAN")
+	config.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	config.AutomaticEnv()
+
+	command := &cobra.Command{
+		Use:           "projscan",
+		Short:         "Scan artifacts in a directory",
+		Long:          "Scan Docker image archives, Helm charts, Java application archives, and release directories.",
+		Args:          cobra.NoArgs,
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			directory, err := filepath.Abs(config.GetString("directory"))
+			if err != nil {
+				return fmt.Errorf("resolve scan directory: %w", err)
+			}
+			return scanDirectory(directory, config.GetBool("latest"), cmd.OutOrStdout())
+		},
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if err := config.BindPFlag("directory", cmd.Flags().Lookup("directory")); err != nil {
+				return fmt.Errorf("bind directory flag: %w", err)
+			}
+			if err := config.BindPFlag("latest", cmd.Flags().Lookup("latest")); err != nil {
+				return fmt.Errorf("bind latest flag: %w", err)
+			}
+			if cmd.Flags().Changed("dir") {
+				config.Set("directory", cmd.Flag("dir").Value.String())
+			}
+			return nil
+		},
+	}
+	command.SetOut(stdout)
+	command.SetErr(stderr)
+	command.Flags().StringP("directory", "d", ".", "directory to scan")
+	command.Flags().String("dir", "", "alias for --directory")
+	command.Flags().Bool("latest", false, "keep only latest Docker tags, Helm chart versions, and Java archive filename versions")
+	return command
+}
+
+func scanDirectory(directory string, latestOnly bool, stdout io.Writer) error {
+	info, err := os.Stat(directory)
+	if err != nil {
+		return fmt.Errorf("access scan directory %s: %w", directory, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("scan target is not a directory: %s", directory)
+	}
+
+	releases := latestVersionResults(listDirectoryResults(directory))
+	for _, item := range listDirectoryNames(releases) {
+		fmt.Fprintln(stdout, item)
+	}
+
+	results := make([]scanResult, 0, len(releases))
+	for _, release := range releases {
+		results = append(results, scanResult{
+			Name: release.Name,
+			Path: release.Path,
+			Type: "release-directory",
+		})
+	}
+
+	artifacts, err := scanArtifacts(directory)
+	if err != nil {
+		return fmt.Errorf("scan %s: %w", directory, err)
+	}
+	if latestOnly {
+		artifacts = latestArtifacts(artifacts)
+	}
+	results = append(results, artifacts...)
 
 	jsonPath := filepath.Join(directory, "results.json")
 	payload, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to encode results: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("encode scan results: %w", err)
 	}
 	if err := os.WriteFile(jsonPath, payload, 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to write %s: %v\n", jsonPath, err)
-		os.Exit(1)
+		return fmt.Errorf("write %s: %w", jsonPath, err)
 	}
-	fmt.Printf("\nSaved JSON results to: %s\n", jsonPath)
+	fmt.Fprintf(stdout, "\nSaved JSON results to: %s\n", jsonPath)
+	return nil
 }
