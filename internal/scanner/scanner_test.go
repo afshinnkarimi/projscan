@@ -1,4 +1,4 @@
-package main
+package scanner
 
 import (
 	"archive/tar"
@@ -9,136 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 )
-
-func TestRunHelpFlags(t *testing.T) {
-	for _, arg := range []string{"-h", "--help"} {
-		t.Run(arg, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			if code := run([]string{arg}, &stdout, &stderr); code != 0 {
-				t.Fatalf("run() exit code = %d, want 0; stderr: %s", code, stderr.String())
-			}
-			output := stdout.String() + stderr.String()
-			for _, want := range []string{"Usage:", "--directory", "--dir", "--latest", "-h, --help"} {
-				if !strings.Contains(output, want) {
-					t.Errorf("help output does not contain %q: %s", want, output)
-				}
-			}
-			if strings.Contains(output, "--config") {
-				t.Errorf("help output still advertises config-file support: %s", output)
-			}
-		})
-	}
-}
-
-func TestRunUsesCurrentDirectoryByDefault(t *testing.T) {
-	root := t.TempDir()
-	originalDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(root); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.Chdir(originalDirectory); err != nil {
-			t.Errorf("restore working directory: %v", err)
-		}
-	}()
-
-	var stdout, stderr bytes.Buffer
-	if code := run(nil, &stdout, &stderr); code != 0 {
-		t.Fatalf("run() exit code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-	if _, err := os.Stat(filepath.Join(root, "results.json")); err != nil {
-		t.Fatalf("results.json was not written in the current directory: %v", err)
-	}
-	if !strings.Contains(stdout.String(), "Saved JSON results to: "+filepath.Join(root, "results.json")) {
-		t.Errorf("output does not mention results path: %s", stdout.String())
-	}
-}
-
-func TestRunDirectoryFlag(t *testing.T) {
-	root := t.TempDir()
-	target := filepath.Join(root, "target")
-	if err := os.Mkdir(target, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"--directory", target}, &stdout, &stderr); code != 0 {
-		t.Fatalf("run() exit code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-	if _, err := os.Stat(filepath.Join(target, "results.json")); err != nil {
-		t.Fatalf("results.json was not written to the selected directory: %v", err)
-	}
-}
-
-func TestRunDirectoryAlias(t *testing.T) {
-	target := t.TempDir()
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"--dir", target}, &stdout, &stderr); code != 0 {
-		t.Fatalf("run() exit code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-	if _, err := os.Stat(filepath.Join(target, "results.json")); err != nil {
-		t.Fatalf("results.json was not written to the selected directory: %v", err)
-	}
-}
-
-func TestRunLatestFlagFiltersResults(t *testing.T) {
-	root := t.TempDir()
-	for _, chart := range []struct {
-		directory string
-		version   string
-	}{
-		{directory: "old", version: "1.9.0"},
-		{directory: "new", version: "1.10.0"},
-	} {
-		chartDir := filepath.Join(root, chart.directory)
-		if err := os.MkdirAll(chartDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		metadata := "apiVersion: v2\nname: example\nversion: " + chart.version + "\n"
-		if err := os.WriteFile(filepath.Join(chartDir, "Chart.yaml"), []byte(metadata), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	writeTestTar(t, filepath.Join(root, "example-1.10.0.tgz"), map[string]string{
-		"example/Chart.yaml": "apiVersion: v2\nname: example\nversion: 1.10.0\n",
-	}, true)
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"--latest", "--directory", root}, &stdout, &stderr); code != 0 {
-		t.Fatalf("run() exit code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-	data, err := os.ReadFile(filepath.Join(root, "results.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var results []scanResult
-	if err := json.Unmarshal(data, &results); err != nil {
-		t.Fatal(err)
-	}
-	if len(results) != 1 {
-		t.Fatalf("--latest results = %#v, want only chart version 1.10.0", results)
-	}
-	charts := helmChartVersions(results[0].Inventory)
-	if len(charts) != 1 || charts[0].name != "example" || charts[0].version != "1.10.0" {
-		t.Fatalf("--latest chart inventory = %#v, want example version 1.10.0", charts)
-	}
-}
-
-func TestRunReadsViperEnvironment(t *testing.T) {
-	envTarget := t.TempDir()
-	t.Setenv("PROJSCAN_DIRECTORY", envTarget)
-	var stdout, stderr bytes.Buffer
-	if code := run(nil, &stdout, &stderr); code != 0 {
-		t.Fatalf("run() exit code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-	if _, err := os.Stat(filepath.Join(envTarget, "results.json")); err != nil {
-		t.Fatalf("environment setting was not used: %v", err)
-	}
-}
 
 func TestScanArtifactsByContents(t *testing.T) {
 	root := t.TempDir()
@@ -180,15 +52,15 @@ func TestScanArtifactsByContents(t *testing.T) {
 		"app/app.jar": testJar(t, "Implementation-Title: example-app\nImplementation-Version: 3.4.1\nMain-Class: org.example.Main\n"),
 	}, true)
 
-	results, err := scanArtifacts(root)
+	results, err := ScanArtifacts(root)
 	if err != nil {
-		t.Fatalf("scanArtifacts() error = %v", err)
+		t.Fatalf("ScanArtifacts() error = %v", err)
 	}
 	if len(results) != 5 {
-		t.Fatalf("scanArtifacts() returned %d results, want 5: %#v", len(results), results)
+		t.Fatalf("ScanArtifacts() returned %d results, want 5: %#v", len(results), results)
 	}
 
-	byName := make(map[string]scanResult)
+	byName := make(map[string]Result)
 	for _, result := range results {
 		byName[result.Name] = result
 	}
@@ -230,30 +102,30 @@ func TestScanArtifactsByContents(t *testing.T) {
 }
 
 func TestLatestArtifactsKeepsOnlyLatestSemanticVersions(t *testing.T) {
-	results := []scanResult{
+	results := []Result{
 		{
 			Name: "app-old.tar", Type: "docker-image",
-			Inventory: artifactInventory{Image: &dockerImageDetails{Tags: []string{"registry.example/app:1.2.0", "registry.example/app:latest"}}},
+			Inventory: ArtifactInventory{Image: &DockerImageDetails{Tags: []string{"registry.example/app:1.2.0", "registry.example/app:latest"}}},
 		},
 		{
 			Name: "app-new.tar", Type: "docker-image",
-			Inventory: artifactInventory{Image: &dockerImageDetails{Tags: []string{"registry.example/app:v1.10.0", "registry.example/app:stable"}}},
+			Inventory: ArtifactInventory{Image: &DockerImageDetails{Tags: []string{"registry.example/app:v1.10.0", "registry.example/app:stable"}}},
 		},
 		{
 			Name: "chart-old.tgz", Path: "chart-old.tgz", Type: "helm-chart",
-			Inventory: artifactInventory{Metadata: map[string]string{"name": "example-chart", "version": "2.1.0"}},
+			Inventory: ArtifactInventory{Metadata: map[string]string{"name": "example-chart", "version": "2.1.0"}},
 		},
 		{
 			Name: "chart-new.tgz", Path: "m-original.tgz", Type: "helm-chart",
-			Inventory: artifactInventory{Metadata: map[string]string{"name": "example-chart", "version": "2.10.0"}},
+			Inventory: ArtifactInventory{Metadata: map[string]string{"name": "example-chart", "version": "2.10.0"}},
 		},
 		{
 			Name: "chart-new-copy.tgz", Path: "z-copy.tgz", Type: "helm-chart",
-			Inventory: artifactInventory{Metadata: map[string]string{"name": "example-chart", "version": "2.10.0"}},
+			Inventory: ArtifactInventory{Metadata: map[string]string{"name": "example-chart", "version": "2.10.0"}},
 		},
 		{
 			Name: "chart-new-preferred.tgz", Path: "a-copy.tgz", Type: "helm-chart",
-			Inventory: artifactInventory{Metadata: map[string]string{"name": "example-chart", "version": "2.10.0"}},
+			Inventory: ArtifactInventory{Metadata: map[string]string{"name": "example-chart", "version": "2.10.0"}},
 		},
 		{
 			Name: "java-old.tar.gz", Type: "java-application", latestKey: "java:example-app", latestTag: "3.9.0",
@@ -266,14 +138,14 @@ func TestLatestArtifactsKeepsOnlyLatestSemanticVersions(t *testing.T) {
 		},
 	}
 
-	got := latestArtifacts(results)
+	got := LatestArtifacts(results)
 	gotNames := make([]string, 0, len(got))
 	for _, result := range got {
 		gotNames = append(gotNames, result.Name)
 	}
 	wantNames := []string{"app-new.tar", "chart-new-preferred.tgz", "java-new.tar.gz", "unversioned.tar"}
 	if !reflect.DeepEqual(gotNames, wantNames) {
-		t.Fatalf("latestArtifacts() names = %#v, want %#v", gotNames, wantNames)
+		t.Fatalf("LatestArtifacts() names = %#v, want %#v", gotNames, wantNames)
 	}
 	if !reflect.DeepEqual(got[0].Inventory.Image.Tags, []string{"registry.example/app:v1.10.0"}) {
 		t.Fatalf("latest Docker tags = %#v", got[0].Inventory.Image.Tags)
@@ -281,34 +153,34 @@ func TestLatestArtifactsKeepsOnlyLatestSemanticVersions(t *testing.T) {
 }
 
 func TestLatestHelmChartsSupportsPrefixedMetadataAndTwoPartVersions(t *testing.T) {
-	results := []scanResult{
+	results := []Result{
 		{
 			Name: "mychart-directory", Path: "a/mychart", Type: "helm-chart",
-			Inventory: artifactInventory{Metadata: map[string]string{
+			Inventory: ArtifactInventory{Metadata: map[string]string{
 				"name": "mychart", "version": "3.43",
 			}},
 		},
 		{
 			Name: "mychart-3.52.tgz", Path: "b/mychart-3.52.tgz", Type: "helm-chart",
-			Inventory: artifactInventory{Metadata: map[string]string{
+			Inventory: ArtifactInventory{Metadata: map[string]string{
 				"mychart/name": "mychart", "mychart/version": "3.52",
 			}},
 		},
 		{
 			Name: "mychart-4.48.0.tgz", Path: "c/mychart-4.48.0.tgz", Type: "helm-chart",
-			Inventory: artifactInventory{Metadata: map[string]string{
+			Inventory: ArtifactInventory{Metadata: map[string]string{
 				"mychart/name": "mychart", "mychart/version": "4.48.0",
 			}},
 		},
 		{
 			Name: "otherchart-directory", Path: "d/otherchart", Type: "helm-chart",
-			Inventory: artifactInventory{Metadata: map[string]string{
+			Inventory: ArtifactInventory{Metadata: map[string]string{
 				"otherchart/name": "otherchart", "otherchart/version": "1.0.0",
 			}},
 		},
 	}
 
-	got := latestArtifacts(results)
+	got := LatestArtifacts(results)
 	gotNames := make([]string, 0, len(got))
 	for _, result := range got {
 		gotNames = append(gotNames, result.Name)
@@ -320,17 +192,17 @@ func TestLatestHelmChartsSupportsPrefixedMetadataAndTwoPartVersions(t *testing.T
 }
 
 func TestLatestHelmIgnoresSubchartVersionsWhenSelectingParentChart(t *testing.T) {
-	results := []scanResult{
+	results := []Result{
 		{
 			Name: "cilium", Path: "a/cilium", Type: "helm-chart",
-			Inventory: artifactInventory{Metadata: map[string]string{
+			Inventory: ArtifactInventory{Metadata: map[string]string{
 				"name":    "cilium",
 				"version": "1.20.3",
 			}},
 		},
 		{
 			Name: "cilium-1.6.9.tgz", Path: "b/cilium-1.6.9.tgz", Type: "helm-chart",
-			Inventory: artifactInventory{Metadata: map[string]string{
+			Inventory: ArtifactInventory{Metadata: map[string]string{
 				"cilium/name":                    "cilium",
 				"cilium/version":                 "1.6.9",
 				"cilium/charts/agent/name":       "agent",
@@ -341,7 +213,7 @@ func TestLatestHelmIgnoresSubchartVersionsWhenSelectingParentChart(t *testing.T)
 		},
 	}
 
-	got := latestArtifacts(results)
+	got := LatestArtifacts(results)
 	if len(got) != 1 || got[0].Name != "cilium" {
 		t.Fatalf("latest Cilium chart = %#v, want only directory chart version 1.20.3", got)
 	}
@@ -363,11 +235,11 @@ func TestLatestHelmChartsAcrossDirectoryAndArchives(t *testing.T) {
 		"mychart/Chart.yaml": "apiVersion: v2\nname: mychart\nversion: 4.48.0\n",
 	}, true)
 
-	results, err := scanArtifacts(root)
+	results, err := ScanArtifacts(root)
 	if err != nil {
-		t.Fatalf("scanArtifacts() error = %v", err)
+		t.Fatalf("ScanArtifacts() error = %v", err)
 	}
-	got := latestArtifacts(results)
+	got := LatestArtifacts(results)
 	if len(got) != 1 || got[0].Name != "mychart-4.48.0.tgz" {
 		t.Fatalf("latest chart across directories and archives = %#v, want mychart-4.48.0.tgz", got)
 	}
@@ -387,11 +259,11 @@ func TestJavaLatestUsesArchiveFilename(t *testing.T) {
 		}, true)
 	}
 
-	var results []scanResult
+	var results []Result
 	for _, name := range []string{"java-1.1.0.tar.gz", "java-1.2.0.tar.gz"} {
 		results = append(results, scanTarArchive(filepath.Join(root, name)))
 	}
-	got := latestArtifacts(results)
+	got := LatestArtifacts(results)
 	if len(got) != 1 || got[0].Name != "java-1.2.0.tar.gz" {
 		t.Fatalf("latest Java archive = %#v, want java-1.2.0.tar.gz", got)
 	}
@@ -417,9 +289,9 @@ func TestScanUnknownArchiveReportsError(t *testing.T) {
 		"readme.txt": "not a supported artifact",
 	}, false)
 
-	results, err := scanArtifacts(root)
+	results, err := ScanArtifacts(root)
 	if err != nil {
-		t.Fatalf("scanArtifacts() error = %v", err)
+		t.Fatalf("ScanArtifacts() error = %v", err)
 	}
 	if len(results) != 1 || results[0].Type != "unknown" || len(results[0].Errors) == 0 {
 		t.Fatalf("unknown archive result = %#v", results)

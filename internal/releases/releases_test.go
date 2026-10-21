@@ -1,4 +1,4 @@
-package main
+package releases
 
 import (
 	"os"
@@ -23,7 +23,14 @@ func TestListDirectoriesMatchesReleaseNames(t *testing.T) {
 		}
 	}
 
-	got := listDirectories(root)
+	results, err := LatestInDirectory(root)
+	if err != nil {
+		t.Fatalf("LatestInDirectory() error = %v", err)
+	}
+	got := make([]string, 0, len(results))
+	for _, result := range results {
+		got = append(got, result.Name)
+	}
 	sort.Strings(got)
 
 	want := []string{
@@ -49,7 +56,15 @@ func TestLatestVersionNames(t *testing.T) {
 		"ServerSide",
 	}
 
-	got := latestVersionNames(items)
+	results := make([]Result, 0, len(items))
+	for _, name := range items {
+		results = append(results, Result{Name: name})
+	}
+	selected := Latest(results)
+	got := make([]string, 0, len(selected))
+	for _, result := range selected {
+		got = append(got, result.Name)
+	}
 	sort.Strings(got)
 
 	want := []string{
