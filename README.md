@@ -1,5 +1,7 @@
 # ProjScan
 
+![Project Logo](docs/images/Banner.png)
+
 ProjScan is a Go-based CLI tool for scanning a directory and identifying software artifacts such as Docker image archives, Helm charts, Java application bundles, and release directories. It inspects each artifact, extracts metadata, and writes a structured JSON inventory for downstream automation, validation, and reporting.
 
 The project is designed for teams that manage curated artifact repositories, release staging environments, and package inventories where it is useful to quickly answer questions like:
